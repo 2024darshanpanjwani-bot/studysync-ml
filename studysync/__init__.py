@@ -1,0 +1,1 @@
+"""StudySync application logic."""
