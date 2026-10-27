@@ -21,6 +21,11 @@ from studysync.database import (
 from studysync.model_store import save_model
 from studysync.models import MODEL_NAMES, compare_models, train_model
 from studysync.planner import generate_timetable
+from studysync.research_data import (
+    KAGGLE_2024_DATASET,
+    extract_research_dataset,
+    transform_research_dataset,
+)
 
 st.set_page_config(
     page_title="StudySync | Student Performance Studio",
@@ -149,6 +154,11 @@ def get_cohort() -> pd.DataFrame:
     return generate_synthetic_dataset(1200, seed=42)
 
 
+@st.cache_data(show_spinner="Extracting the Kaggle 2024 research dataset...")
+def get_research_source() -> pd.DataFrame:
+    return extract_research_dataset(KAGGLE_2024_DATASET)
+
+
 @st.cache_data(show_spinner="Comparing regression models on a held-out split...")
 def get_model_comparison() -> pd.DataFrame:
     return compare_models(get_cohort())
@@ -215,13 +225,33 @@ def section_heading(title: str, caption: str | None = None) -> None:
         st.markdown(f'<div class="section-caption">{caption}</div>', unsafe_allow_html=True)
 
 
-def render_dashboard(cohort: pd.DataFrame, sessions: pd.DataFrame) -> None:
+def render_dashboard(sessions: pd.DataFrame) -> None:
     page_heading("OVERVIEW / 01", "Your study, in focus.", "A clear view of performance signals and the work you have logged.")
+    try:
+        source_data = get_research_source()
+        cohort = transform_research_dataset(source_data, KAGGLE_2024_DATASET)
+    except (FileNotFoundError, ValueError, OSError) as error:
+        st.error(f"Could not load the Kaggle 2024 research dataset: {error}")
+        return
+
     st.markdown(
-        '<div class="notice"><strong>Demo data:</strong> Cohort charts and model signals below use '
-        'synthetic records. They demonstrate the product workflow and are not evidence of real-world accuracy.</div>',
+        '<div class="notice"><strong>Kaggle 2024 dataset:</strong> The dashboard uses the local, '
+        'unmodified Student Performance Factors CSV. It is not replaced with generated records.</div>',
         unsafe_allow_html=True,
     )
+
+    section_heading("Research data pipeline", "Kaggle 2024 research data")
+    pipeline_columns = st.columns(3)
+    pipeline_stages = (
+        ("Extract", "Read the Kaggle Student Performance Factors CSV", f"{len(source_data):,} source rows"),
+        ("Transform", "Select and validate the five shared numeric fields", f"{len(cohort.columns)} fields · {len(cohort):,} valid rows"),
+        ("Load", "Use the transformed data for dashboard charts", f"{len(cohort):,} rows loaded"),
+    )
+    for column, (stage, description, detail) in zip(pipeline_columns, pipeline_stages):
+        with column:
+            with st.container(border=True):
+                section_heading(stage, description)
+                st.caption(detail)
 
     progress = summarize_progress(sessions)
     columns = st.columns(4)
@@ -229,7 +259,7 @@ def render_dashboard(cohort: pd.DataFrame, sessions: pd.DataFrame) -> None:
         ("Study time", f"{progress['total_minutes'] / 60:.1f}h", "Logged in your study tracker", "schedule"),
         ("Sessions", str(progress["session_count"]), "Personal study records", "library_books"),
         ("Focus average", f"{progress['average_focus']:.1f}/5", "Across logged sessions", "center_focus_strong"),
-        ("Cohort mean", f"{cohort['exam_score'].mean():.1f}", "Synthetic exam score / 100", "query_stats"),
+        ("Mean exam score", f"{cohort['exam_score'].mean():.1f}", f"Kaggle 2024 · {len(cohort):,} records", "query_stats"),
     ]
     for column, (label, value, note, icon) in zip(columns, values):
         with column:
@@ -237,23 +267,24 @@ def render_dashboard(cohort: pd.DataFrame, sessions: pd.DataFrame) -> None:
 
     left, right = st.columns([1.3, 1])
     with left:
-        section_heading("Subject performance", "Synthetic cohort averages, grouped by subject")
-        subject_scores = cohort.groupby("subject", as_index=False)["exam_score"].mean().sort_values("exam_score")
-        fig = px.bar(
-            subject_scores,
-            x="exam_score",
-            y="subject",
-            orientation="h",
-            color="exam_score",
+        section_heading("Study time and exam score", "Kaggle 2024 records; color shows attendance")
+        fig = px.scatter(
+            cohort,
+            x="hours_studied",
+            y="exam_score",
+            color="attendance_percent",
             color_continuous_scale=[[0, "#594283"], [1, CYAN]],
-            labels={"exam_score": "Mean score", "subject": ""},
+            labels={
+                "hours_studied": "Hours studied",
+                "exam_score": "Exam score",
+                "attendance_percent": "Attendance %",
+            },
         )
-        fig.update_coloraxes(showscale=False)
-        fig.update_xaxes(range=[0, 100], title="Mean exam score / 100")
-        fig.update_traces(marker_line_width=0, opacity=.94, hovertemplate="%{y}<br>Mean score: %{x:.1f}<extra></extra>")
+        fig.update_yaxes(title="Exam score")
+        fig.update_traces(marker={"size": 7, "opacity": .65}, hovertemplate="Hours studied: %{x}<br>Exam score: %{y}<br>Attendance: %{marker.color}%<extra></extra>")
         st.plotly_chart(chart_layout(fig, 330), width="stretch")
     with right:
-        section_heading("Score distribution", "Illustrative synthetic outcomes")
+        section_heading("Score distribution", "Kaggle 2024 exam scores")
         fig = px.histogram(
             cohort,
             x="exam_score",
@@ -265,6 +296,9 @@ def render_dashboard(cohort: pd.DataFrame, sessions: pd.DataFrame) -> None:
         fig.update_xaxes(title="Exam score / 100")
         fig.update_yaxes(title="Students")
         st.plotly_chart(chart_layout(fig, 330), width="stretch")
+
+    with st.expander("Preview the loaded five-column dataset"):
+        st.dataframe(cohort.head(10), width="stretch", hide_index=True)
 
     section_heading("Your recent rhythm", "Personal study time saved to this device")
     if sessions.empty:
@@ -609,22 +643,23 @@ def main() -> None:
         )
         st.divider()
         st.markdown("<span class='eyebrow'>DATA MODE</span>", unsafe_allow_html=True)
-        st.caption("Synthetic cohort · local-only progress")
+        st.caption("Dashboard uses Kaggle 2024 · demo models remain synthetic")
 
     try:
-        cohort = get_cohort()
         if page == "Dashboard":
-            render_dashboard(cohort, fetch_study_sessions())
-        elif page == "Prediction":
-            render_prediction()
-        elif page == "Study planner":
-            render_planner()
-        elif page == "Subject insights":
-            render_subject_insights(cohort)
-        elif page == "Progress":
-            render_progress()
+            render_dashboard(fetch_study_sessions())
         else:
-            render_model_insights(cohort)
+            cohort = get_cohort()
+            if page == "Prediction":
+                render_prediction()
+            elif page == "Study planner":
+                render_planner()
+            elif page == "Subject insights":
+                render_subject_insights(cohort)
+            elif page == "Progress":
+                render_progress()
+            else:
+                render_model_insights(cohort)
     except (OSError, RuntimeError, ValueError) as error:
         st.error(f"StudySync could not load this view: {error}")
         st.info("Check the local database path and try reloading the page.")
